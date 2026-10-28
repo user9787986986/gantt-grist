@@ -1,0 +1,366 @@
+
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gantt S1 à S26</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 10px; background: #f8f9fa; color: #333;
+  }
+  .gantt-container {
+    overflow-x: auto; background: white; border: 1px solid #e0e0e0;
+    border-radius: 6px; padding: 12px;
+  }
+  table {
+    width: 100%; min-width: 1000px; border-collapse: collapse;
+    table-layout: fixed; font-size: 12px;
+  }
+  th, td { border: 1px solid #eef2f5; padding: 6px 3px; }
+  th { background: #f1f5f9; color: #475569; text-align: center; }
+  .task-column {
+    width: 180px; min-width: 180px; text-align: left;
+  }
+  .week-header { font-size: 10px; background: #e2e8f0; }
+  .task-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .timeline-wrapper { position: relative; height: 36px; padding: 0; }
+  .gantt-bar {
+    position: absolute; top: 5px; height: 24px;
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    color: white; border-radius: 4px; display: flex; align-items: center;
+    padding: 0 8px; font-size: 11px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; z-index: 2;
+    cursor: pointer; border: 0;
+  }
+  .gantt-bar:hover { filter: brightness(1.12); }
+  .no-data { text-align: center; padding: 20px; color: #94a3b8; }
+  .popup-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(15,23,42,.4); z-index: 1000;
+    justify-content: center; align-items: center; padding: 12px;
+  }
+  .popup-content {
+    background: white; padding: 20px; border-radius: 8px;
+    width: 100%; max-width: 380px; box-shadow: 0 10px 30px #0002;
+    position: relative;
+  }
+  .popup-close {
+    position: absolute; top: 8px; right: 14px;
+    font-size: 24px; cursor: pointer; color: #64748b;
+    background: none; border: 0;
+  }
+  .popup-title {
+    font-size: 15px; margin: 0 25px 14px 0;
+    border-bottom: 1px solid #eef2f5; padding-bottom: 10px;
+    overflow-wrap: anywhere;
+  }
+  .popup-field {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; margin: 12px 0;
+  }
+  .popup-label { font-weight: 600; color: #64748b; width: 95px; flex-shrink: 0; }
+  .popup-select {
+    min-width: 0; flex: 1; padding: 8px;
+    font-size: 13px; border: 1px solid #cbd5e1; border-radius: 4px;
+    background: white;
+  }
+  #save-status { font-size: 12px; color: #64748b; margin-top: 12px; }
+</style>
+</head>
+<body>
+
+<div class="gantt-container">
+  <table id="gantt-table">
+    <thead><tr id="header-weeks">
+      <th class="task-column">Tâches</th>
+    </tr></thead>
+    <tbody id="gantt-body">
+      <tr><td class="no-data">Connexion à Grist…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div id="task-popup" class="popup-overlay">
+  <div class="popup-content" role="dialog" aria-modal="true">
+    <button id="close-popup" class="popup-close" aria-label="Fermer">&times;</button>
+    <h4 id="pop-title" class="popup-title">Détails de la tâche</h4>
+    <div class="popup-field"><span class="popup-label">Responsable :</span><span id="pop-resp">-</span></div>
+    <div class="popup-field"><span class="popup-label">Lieu :</span><span id="pop-lieu">-</span></div>
+    <div class="popup-field"><span class="popup-label">Début :</span><span id="pop-start">-</span></div>
+    <div class="popup-field"><span class="popup-label">Fin :</span><span id="pop-end">-</span></div>
+    <div class="popup-field">
+      <label class="popup-label" for="pop-participant-select">Participant :</label>
+      <select id="pop-participant-select" class="popup-select">
+        <option value="">-- Aucun participant --</option>
+        <option value="Alice">Alice</option>
+        <option value="Bob">Bob</option>
+        <option value="Charlie">Charlie</option>
+        <option value="Julie">Julie</option>
+        <option value="Thomas">Thomas</option>
+      </select>
+    </div>
+    <div id="save-status" role="status" aria-live="polite"></div>
+  </div>
+</div>
+
+<script src="grist-plugin-api-PU.js"></script>
+<script>
+(() => {
+  "use strict";
+
+  // À adapter aux noms EXACTS des colonnes de ta table Grist.
+  const COL = {
+    title: "Titre",
+    start: "Debut",
+    end: "Fin",
+    responsible: "Responsable",
+    place: "Lieu",
+    participant: "Participant"
+  };
+
+  const PARTICIPANTS = ["Alice", "Bob", "Charlie", "Julie", "Thomas"];
+
+  const popup = document.getElementById("task-popup");
+  const select = document.getElementById("pop-participant-select");
+  const status = document.getElementById("save-status");
+  const tbody = document.getElementById("gantt-body");
+  const header = document.getElementById("header-weeks");
+
+  let currentRecordId = null;
+  let currentTableId = null;
+  let recordsById = new Map();
+  let saving = false;
+  let latestRecords = [];
+
+  function text(value) {
+    if (value === null || value === undefined || value === "") return "-";
+    if (Array.isArray(value)) return value.join(", ");
+    return String(value);
+  }
+
+  function dateValue(value) {
+    if (value === null || value === undefined || value === "") return null;
+
+    // Les dates Grist sont généralement des timestamps Unix en secondes.
+    let d;
+    if (typeof value === "number") {
+      d = new Date(value * 1000);
+    } else {
+      d = new Date(value);
+    }
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  function formatDate(value) {
+    const d = dateValue(value);
+    return d ? d.toLocaleDateString("fr-FR") : "-";
+  }
+
+  function getMonday(date) {
+    const d = new Date(date);
+    d.setHours(0, 0, 0, 0);
+    const day = d.getDay() || 7;
+    d.setDate(d.getDate() - day + 1);
+    return d;
+  }
+
+  function showPopup(record) {
+    currentRecordId = record.id;
+    document.getElementById("pop-title").textContent =
+      text(record[COL.title]) === "-" ? `Tâche ${record.id}` : text(record[COL.title]);
+    document.getElementById("pop-resp").textContent = text(record[COL.responsible]);
+    document.getElementById("pop-lieu").textContent = text(record[COL.place]);
+    document.getElementById("pop-start").textContent = formatDate(record[COL.start]);
+    document.getElementById("pop-end").textContent = formatDate(record[COL.end]);
+
+    const participant = record[COL.participant];
+    const value = participant == null ? "" : String(participant);
+
+    // Si la valeur existante n'est pas dans la liste, on la conserve comme choix.
+    select.replaceChildren();
+    const empty = new Option("-- Aucun participant --", "");
+    select.add(empty);
+
+    const options = [...PARTICIPANTS];
+    if (value && !options.includes(value)) options.unshift(value);
+
+    options.forEach(name => select.add(new Option(name, name)));
+    select.value = value;
+
+    select.disabled = false;
+    status.textContent = "";
+    popup.style.display = "flex";
+  }
+
+  function closePopup() {
+    popup.style.display = "none";
+    currentRecordId = null;
+  }
+
+  document.getElementById("close-popup").addEventListener("click", closePopup);
+  popup.addEventListener("click", event => {
+    if (event.target === popup) closePopup();
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape") closePopup();
+  });
+
+  select.addEventListener("change", async () => {
+    if (currentRecordId == null || !currentTableId || saving) return;
+
+    const recordId = currentRecordId;
+    const selectedValue = select.value;
+    const record = recordsById.get(recordId);
+
+    if (!record) {
+      status.textContent = "Tâche introuvable. Actualise le widget.";
+      return;
+    }
+
+    saving = true;
+    select.disabled = true;
+    status.textContent = "Enregistrement…";
+
+    try {
+      await grist.docApi.updateRows(currentTableId, [{
+        id: recordId,
+        fields: {
+          [COL.participant]: selectedValue || null
+        }
+      }]);
+
+      // Mise à jour locale pour garder le pop-up et le Gantt cohérents.
+      record[COL.participant] = selectedValue || null;
+      status.textContent = "Participant enregistré.";
+      render(latestRecords);
+    } catch (error) {
+      console.error("Erreur d'enregistrement Grist :", error);
+      status.textContent =
+        "Échec de la sauvegarde. Vérifie les droits et le nom de la colonne.";
+      alert(
+        "Impossible d'enregistrer le participant dans Grist.\n\n" +
+        "Vérifie le niveau d'accès du widget, le nom de la colonne " +
+        COL.participant + " et les éventuelles règles de validation."
+      );
+      select.value = record[COL.participant] == null
+        ? ""
+        : String(record[COL.participant]);
+    } finally {
+      saving = false;
+      select.disabled = false;
+    }
+  });
+
+  function render(records) {
+    latestRecords = records || [];
+    recordsById = new Map(latestRecords.map(r => [r.id, r]));
+
+    while (header.cells.length > 1) header.deleteCell(1);
+    tbody.replaceChildren();
+
+    const validRecords = latestRecords.filter(r =>
+      dateValue(r[COL.start]) && dateValue(r[COL.end])
+    );
+
+    const year = validRecords.length
+      ? dateValue(validRecords[0][COL.start]).getFullYear()
+      : new Date().getFullYear();
+
+    // La semaine ISO 1 est celle qui contient le 4 janvier.
+    const firstWeek = getMonday(new Date(year, 0, 4));
+    const weeks = [];
+
+    for (let i = 0; i < 26; i++) {
+      const start = new Date(firstWeek);
+      start.setDate(start.getDate() + i * 7);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 6);
+      weeks.push({ start, end, label: "S" + (i + 1) });
+
+      const th = document.createElement("th");
+      th.className = "week-header";
+      th.textContent = "S" + (i + 1);
+      header.appendChild(th);
+    }
+
+    if (!validRecords.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 27;
+      td.className = "no-data";
+      td.textContent = "Aucune tâche avec une date de début et de fin valide.";
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      return;
+    }
+
+    const minDate = weeks[0].start;
+    const maxDate = weeks[25].end;
+    const totalMs = maxDate.getTime() - minDate.getTime() + 86400000;
+
+    validRecords.forEach(record => {
+      const tr = document.createElement("tr");
+      const name = document.createElement("td");
+      name.className = "task-name task-column";
+      name.textContent = text(record[COL.title]) === "-"
+        ? `Tâche ${record.id}`
+        : text(record[COL.title]);
+      name.title = name.textContent;
+      tr.appendChild(name);
+
+      const timeline = document.createElement("td");
+      timeline.className = "timeline-wrapper";
+      timeline.colSpan = 26;
+
+      const start = dateValue(record[COL.start]);
+      const end = dateValue(record[COL.end]);
+
+      if (end < minDate || start > maxDate || end < start) {
+        timeline.textContent = "Hors période";
+        timeline.style.color = "#94a3b8";
+        timeline.style.fontSize = "10px";
+        tr.appendChild(timeline);
+        tbody.appendChild(tr);
+        return;
+      }
+
+      const clippedStart = new Date(Math.max(start.getTime(), minDate.getTime()));
+      const clippedEnd = new Date(Math.min(end.getTime(), maxDate.getTime()));
+
+      const left = (clippedStart - minDate) / totalMs * 100;
+      const width = (clippedEnd - clippedStart + 86400000) / totalMs * 100;
+
+      const bar = document.createElement("button");
+      bar.type = "button";
+      bar.className = "gantt-bar";
+      bar.style.left = left + "%";
+      bar.style.width = Math.max(width, 0.8) + "%";
+      bar.textContent = text(record[COL.title]) === "-"
+        ? `Tâche ${record.id}`
+        : text(record[COL.title]);
+      bar.title = "Cliquer pour consulter ou modifier le participant";
+      bar.addEventListener("click", () => showPopup(record));
+
+      timeline.appendChild(bar);
+      tr.appendChild(timeline);
+      tbody.appendChild(tr);
+    });
+  }
+
+  // Demande explicitement l'accès nécessaire à l'écriture.
+  grist.ready({ requiredAccess: "full" });
+
+  grist.onRecords((records, mappings) => {
+    // Le widget doit être connecté à la table contenant les tâches.
+    // La tableId peut être fournie dans les mappings selon le contexte.
+    if (mappings && mappings.tableId) currentTableId = mappings.tableId;
+
+    render(records);
+  });
+})();
+</script>
+</body>
+</html>
